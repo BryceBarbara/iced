@@ -1104,19 +1104,13 @@ async fn run_instance<P>(
                                 &mut system_theme,
                             );
                         } else {
-                            window.state.update(
+                            process_window_event(
+                                id,
+                                window,
                                 &program,
-                                &window.raw,
-                                &window_event,
-                            );
-
-                            if let Some(event) = conversion::window_event(
                                 window_event,
-                                window.state.scale_factor(),
-                                window.state.modifiers(),
-                            ) {
-                                events.push((id, event));
-                            }
+                                &mut events,
+                            );
                         }
                     }
                     event::Event::AboutToWait => {
@@ -1342,6 +1336,30 @@ where
     actions
 }
 
+/// Updates the state of a [`window::Window`] with a `winit` event and queues
+/// the resulting [`core::Event`], if any.
+fn process_window_event<P, C>(
+    id: window::Id,
+    window: &mut window::Window<P, C>,
+    program: &program::Instance<P>,
+    event: winit::event::WindowEvent,
+    events: &mut Vec<(window::Id, core::Event)>,
+) where
+    P: Program,
+    C: Compositor<Renderer = P::Renderer>,
+    P::Theme: theme::Base,
+{
+    window.state.update(program, &window.raw, &event);
+
+    if let Some(event) = conversion::window_event(
+        event,
+        window.state.scale_factor(),
+        window.state.modifiers(),
+    ) {
+        events.push((id, event));
+    }
+}
+
 fn run_action<'a, P, C>(
     action: Action<P::Message>,
     program: &'a program::Instance<P>,
@@ -1445,7 +1463,7 @@ fn run_action<'a, P, C>(
             }
             window::Action::Resize(id, size) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    let _ = window.raw.request_inner_size(
+                    let new_size = window.raw.request_inner_size(
                         winit::dpi::LogicalSize {
                             width: size.width,
                             height: size.height,
@@ -1454,6 +1472,27 @@ fn run_action<'a, P, C>(
                             window.state.scale_factor(),
                         )),
                     );
+
+                    // On Wayland, the new size is applied client-side and
+                    // returned here; the compositor may never reply with a
+                    // configure, in which case no `Resized` event follows and
+                    // we must drive the resize ourselves. Windows and macOS do
+                    // emit their own `Resized` event with the very same size,
+                    // so we only act when the size actually changed.
+                    if let Some(new_size) = new_size
+                        && Size::new(new_size.width, new_size.height)
+                            != window.state.physical_size()
+                    {
+                        window.raw.request_redraw();
+
+                        process_window_event(
+                            id,
+                            window,
+                            program,
+                            winit::event::WindowEvent::Resized(new_size),
+                            events,
+                        );
+                    }
                 }
             }
             window::Action::SetMinSize(id, size) => {
