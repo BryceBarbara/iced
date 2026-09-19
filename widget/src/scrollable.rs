@@ -28,7 +28,7 @@ use crate::core::mouse;
 use crate::core::overlay;
 use crate::core::renderer;
 use crate::core::text;
-use crate::core::time::{Duration, Instant};
+use crate::core::time::{self, Duration, Instant};
 use crate::core::touch;
 use crate::core::widget;
 use crate::core::widget::operation::{self, Operation};
@@ -599,6 +599,8 @@ where
         let last_offsets = (state.offset_x, state.offset_y);
 
         if let Some(last_scrolled) = state.last_scrolled {
+            let elapsed = time::now().saturating_duration_since(last_scrolled);
+
             let clear_transaction = match event {
                 Event::Mouse(
                     mouse::Event::ButtonPressed(_)
@@ -606,9 +608,9 @@ where
                     | mouse::Event::CursorLeft,
                 ) => true,
                 Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                    last_scrolled.elapsed() > Duration::from_millis(100)
+                    elapsed > Duration::from_millis(100)
                 }
-                _ => last_scrolled.elapsed() > Duration::from_millis(1500),
+                _ => elapsed > Duration::from_millis(1500),
             };
 
             if clear_transaction {
@@ -1575,7 +1577,7 @@ fn notify_scroll<Message>(
     shell: &mut Shell<'_, Message>,
 ) -> bool {
     if notify_viewport(state, on_scroll, bounds, content_bounds, shell) {
-        state.last_scrolled = Some(Instant::now());
+        state.last_scrolled = Some(time::now());
 
         true
     } else {
@@ -2433,5 +2435,111 @@ pub fn default(theme: &Theme, status: Status) -> Style {
                 auto_scroll,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::clipboard;
+    use crate::{Column, Space};
+
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    static ELAPSED_MS: AtomicU64 = AtomicU64::new(0);
+
+    fn virtual_now() -> Instant {
+        *EPOCH.get_or_init(Instant::now)
+            + Duration::from_millis(ELAPSED_MS.load(Ordering::SeqCst))
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Scrolled {
+        Outer,
+        Inner,
+    }
+
+    /// An outer scrollable whose content starts with a nested one:
+    /// the inner list covers `y` in `0..50` of the outer content.
+    fn nested<'a>() -> Element<'a, Scrolled, Theme, ()> {
+        let inner = Scrollable::new(
+            Space::new()
+                .width(Length::Fill)
+                .height(Length::Fixed(1000.0)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(50.0))
+        .on_scroll(|_| Scrolled::Inner);
+
+        let content = Column::new().push(inner).push(
+            Space::new()
+                .width(Length::Fill)
+                .height(Length::Fixed(1000.0)),
+        );
+
+        Scrollable::new(content)
+            .width(Length::Fixed(100.0))
+            .height(Length::Fixed(100.0))
+            .on_scroll(|_| Scrolled::Outer)
+            .into()
+    }
+
+    /// Scrolls the outer list with the wheel away from the inner one, lets
+    /// `ms` pass on the custom clock (and only microseconds on the wall
+    /// clock), then wheels over the inner list. Returns who scrolled then.
+    fn wheel_over_inner_after(ms: u64) -> Vec<Scrolled> {
+        let mut element = nested();
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(100.0, 100.0));
+        let node = element.as_widget_mut().layout(&mut tree, &(), &limits);
+        let viewport = Rectangle::new(Point::ORIGIN, Size::new(100.0, 100.0));
+
+        let wheel = Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -10.0 },
+        });
+
+        let mut wheel_at = |y: f32| {
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+
+            element.as_widget_mut().update(
+                &mut tree,
+                &wheel,
+                Layout::new(&node),
+                mouse::Cursor::Available(Point::new(50.0, y)),
+                &(),
+                &mut clipboard::Null,
+                &mut shell,
+                &viewport,
+            );
+
+            messages
+        };
+
+        ELAPSED_MS.store(0, Ordering::SeqCst);
+        assert_eq!(wheel_at(75.0), vec![Scrolled::Outer]);
+
+        ELAPSED_MS.store(ms, Ordering::SeqCst);
+        wheel_at(20.0)
+    }
+
+    #[test]
+    fn a_custom_clock_decides_when_a_wheel_transaction_ends() {
+        time::set_clock(virtual_now);
+
+        // Within the transaction on the custom clock: the outer list keeps
+        // the wheel, even though the cursor is now over the inner one.
+        let within = wheel_over_inner_after(1_000);
+
+        // Past it on the custom clock, though the wall clock has barely
+        // moved: the transaction is over and the inner list scrolls.
+        let past = wheel_over_inner_after(2_000);
+
+        time::set_clock(Instant::now);
+
+        assert_eq!(within, vec![Scrolled::Outer]);
+        assert_eq!(past, vec![Scrolled::Inner]);
     }
 }
