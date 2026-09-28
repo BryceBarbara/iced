@@ -46,6 +46,8 @@ use crate::core::theme;
 use crate::core::time::{Duration, Instant};
 use crate::core::widget::operation;
 use crate::core::widget::{self, Widget};
+
+use std::cell;
 use crate::core::window;
 use crate::core::{
     Background, Border, Color, Element, Event, InputMethod, Length, Padding,
@@ -1140,6 +1142,129 @@ where
         let state = tree.state.downcast_mut::<State<Highlighter>>();
 
         operation.focusable(self.id.as_ref(), layout.bounds(), state);
+
+        // A `TextEditor` IS a text input as far as an `Operation` is
+        // concerned: it holds text, it takes the keyboard, and its cursor and
+        // selection can be driven. Reporting it here is what lets
+        // `operation::text_input::{select_all, move_cursor_to_end, ..}` reach
+        // it -- and, the reason this was added, what lets a caller asking
+        // "which widget owns the keyboard" get "a text one" instead of
+        // "none", which is the only answer a focusable-only report can give.
+        operation.text_input(
+            self.id.as_ref(),
+            layout.bounds(),
+            &mut Operable {
+                content: self.content,
+                text: cell::OnceCell::new(),
+            },
+        );
+    }
+}
+
+/// A [`Content`] seen through [`operation::TextInput`].
+///
+/// The visible text is flattened ON DEMAND: an `Operation` that only wants
+/// bounds -- a focus scan runs on most messages -- must not pay to flatten a
+/// document it never reads.
+struct Operable<'a, R>
+where
+    R: text::Renderer,
+{
+    content: &'a Content<R>,
+    text: cell::OnceCell<String>,
+}
+
+impl<R> Operable<'_, R>
+where
+    R: text::Renderer,
+{
+    fn perform(&self, action: Action) {
+        self.content.0.borrow_mut().editor.perform(action);
+    }
+
+    /// The [`Position`] `chars` characters into the content.
+    ///
+    /// The argument is a CHARACTER offset, matching the cursor positions
+    /// `text_input` takes, while a [`Position`]'s column is a byte index into
+    /// its own line -- so converting between them is the point of this, not an
+    /// incidental detail. An offset past the end lands at the end.
+    fn position(&self, chars: usize) -> Position {
+        let mut left = chars;
+        let mut last = Position { line: 0, column: 0 };
+
+        for line in 0..self.content.line_count() {
+            let Some(text) = self.content.line(line) else {
+                break;
+            };
+            let count = text.text.chars().count();
+
+            if left <= count {
+                let column = text
+                    .text
+                    .char_indices()
+                    .nth(left)
+                    .map_or(text.text.len(), |(i, _)| i);
+
+                return Position { line, column };
+            }
+
+            // ...and the line ending, which the next line starts after.
+            left -= count + 1;
+            last = Position {
+                line,
+                column: text.text.len(),
+            };
+        }
+
+        last
+    }
+
+    /// Puts the caret at `position`, selecting back to `from` when asked.
+    ///
+    /// A motion CLEARS a selection and `move_to` does not, so the caret-only
+    /// case opens with one to leave no stale selection behind.
+    fn place(&self, position: Position, from: Option<Position>) {
+        if from.is_none() {
+            self.perform(Action::Move(Motion::DocumentStart));
+        }
+
+        self.content.0.borrow_mut().editor.move_to(Cursor {
+            position,
+            selection: from,
+        });
+    }
+}
+
+impl<R> operation::TextInput for Operable<'_, R>
+where
+    R: text::Renderer,
+{
+    fn text(&self) -> &str {
+        self.text.get_or_init(|| self.content.text())
+    }
+
+    fn move_cursor_to_front(&mut self) {
+        self.perform(Action::Move(Motion::DocumentStart));
+    }
+
+    fn move_cursor_to_end(&mut self) {
+        self.perform(Action::Move(Motion::DocumentEnd));
+    }
+
+    fn move_cursor_to(&mut self, position: usize) {
+        let at = self.position(position);
+
+        self.place(at, None);
+    }
+
+    fn select_all(&mut self) {
+        self.perform(Action::SelectAll);
+    }
+
+    fn select_range(&mut self, start: usize, end: usize) {
+        let (from, to) = (self.position(start), self.position(end));
+
+        self.place(to, Some(from));
     }
 }
 
