@@ -190,6 +190,18 @@ impl text::Editor for () {
 
     fn perform(&mut self, _action: text::editor::Action) {}
 
+    fn set_text(&mut self, _text: &str) {}
+
+    fn scroll(&self) -> text::editor::Scroll {
+        text::editor::Scroll::default()
+    }
+
+    fn scroll_to(&mut self, _scroll: text::editor::Scroll) {}
+
+    fn end_scroll(&mut self) -> text::editor::Scroll {
+        text::editor::Scroll::default()
+    }
+
     fn move_to(&mut self, _cursor: text::editor::Cursor) {}
 
     fn bounds(&self) -> Size {

@@ -1,6 +1,6 @@
 //! Draw and edit text.
 use crate::core::text::editor::{
-    self, Action, Cursor, Direction, Edit, Motion, Position, Selection,
+    self, Action, Cursor, Direction, Edit, Motion, Position, Scroll, Selection,
 };
 use crate::core::text::highlighter::{self, Highlighter};
 use crate::core::text::{LineHeight, Wrapping};
@@ -505,6 +505,81 @@ impl editor::Editor for Editor {
                 }
             }
         });
+    }
+
+    fn set_text(&mut self, text: &str) {
+        let mut font_system =
+            text::font_system().write().expect("Write font system");
+
+        self.with_internal_mut(|internal| {
+            // `Buffer::set_text` replaces the lines and parks the scroll at the
+            // top, but LEAVES the size the last layout gave this editor -- which
+            // is the whole point of reusing it: a scroll set afterwards has a
+            // viewport to be clamped against, where one set on a brand new
+            // `Editor` would collapse straight back to the top.
+            buffer_mut_from_editor(&mut internal.editor).set_text(
+                font_system.raw(),
+                text,
+                &cosmic_text::Attrs::new(),
+                cosmic_text::Shaping::Advanced,
+                None,
+            );
+
+            // The cursor and selection pointed into text that is gone.
+            internal.editor.set_selection(cosmic_text::Selection::None);
+            internal.editor.set_cursor(cosmic_text::Cursor::default());
+            internal.topmost_line_changed = Some(0);
+        });
+    }
+
+    fn scroll(&self) -> Scroll {
+        let scroll = buffer_from_editor(&self.internal().editor).scroll();
+
+        Scroll {
+            line: scroll.line,
+            offset: scroll.vertical,
+        }
+    }
+
+    fn scroll_to(&mut self, scroll: Scroll) {
+        let mut font_system =
+            text::font_system().write().expect("Write font system");
+
+        self.with_internal_mut(|internal| {
+            // Consume any pending "scroll to the cursor" first. `set_cursor`
+            // arms it, and the next `shape_as_needed` -- which every layout
+            // runs -- would otherwise undo the position set here.
+            internal.editor.shape_as_needed(font_system.raw(), false);
+
+            let buffer = buffer_mut_from_editor(&mut internal.editor);
+
+            buffer.set_scroll(cosmic_text::Scroll {
+                line: scroll.line.min(buffer.lines.len().saturating_sub(1)),
+                vertical: scroll.offset,
+                horizontal: 0.0,
+            });
+
+            // Clamps to what the contents and the size allow.
+            buffer.shape_until_scroll(font_system.raw(), false);
+        });
+    }
+
+    fn end_scroll(&mut self) -> Scroll {
+        // `shape_until_scroll` pulls a scroll that ran off the end back up
+        // until the viewport is full again, so asking for the last line and
+        // letting it clamp IS the end position. `scroll_to` bounds the line, so
+        // `usize::MAX` cannot walk off the buffer.
+        let scroll = self.scroll();
+
+        self.scroll_to(Scroll {
+            line: usize::MAX,
+            offset: 0.0,
+        });
+
+        let end = self.scroll();
+        self.scroll_to(scroll);
+
+        end
     }
 
     fn move_to(&mut self, cursor: Cursor) {

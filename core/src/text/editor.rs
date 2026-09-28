@@ -35,6 +35,39 @@ pub trait Editor: Sized + Default {
     /// Performs an [`Action`] on the [`Editor`].
     fn perform(&mut self, action: Action);
 
+    /// Replaces the contents of the [`Editor`], keeping the size it was last
+    /// laid out at.
+    ///
+    /// Unlike [`with_text`](Self::with_text) this reuses the editor, so a
+    /// caller that rebuilds its contents -- a log or console view appending
+    /// lines -- can put the cursor and the [`Scroll`] position back afterwards
+    /// instead of starting over at the top. The cursor and selection are reset,
+    /// since the text they pointed into is gone.
+    fn set_text(&mut self, text: &str);
+
+    /// Returns the current [`Scroll`] position of the [`Editor`].
+    ///
+    /// This is the position last APPLIED, which an `Action::Scroll` leaves
+    /// un-clamped until the next shaping pass: a wheel event past the end
+    /// reads back as an offset far beyond the line it names. Pass it through
+    /// [`scroll_to`](Self::scroll_to) to settle it first if you mean to
+    /// compare it with anything.
+    fn scroll(&self) -> Scroll;
+
+    /// Scrolls the [`Editor`] to the given [`Scroll`] position, clamped to what
+    /// its contents and size allow.
+    fn scroll_to(&mut self, scroll: Scroll);
+
+    /// Returns the [`Scroll`] position that shows the END of the [`Editor`]'s
+    /// contents.
+    ///
+    /// Comparing it with [`scroll`](Self::scroll) is how a caller asks "is the
+    /// view at the bottom"; passing it to [`scroll_to`](Self::scroll_to) is how
+    /// a log view follows its own tail. Shaping is lazy, so this may shape
+    /// lines that have not been shaped yet; the current scroll position is left
+    /// as it was.
+    fn end_scroll(&mut self) -> Scroll;
+
     /// Moves the cursor to the given position.
     fn move_to(&mut self, cursor: Cursor);
 
@@ -204,6 +237,20 @@ pub struct Cursor {
 
     /// The selection position, if any.
     pub selection: Option<Position>,
+}
+
+/// The vertical scroll position of an [`Editor`].
+///
+/// It names a LINE and an offset into it, never an absolute pixel distance from
+/// the top, so it stays meaningful when the lines above it change height -- or,
+/// for an editor whose contents are replaced wholesale, when they are replaced
+/// by different lines entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Scroll {
+    /// The first line of text in view.
+    pub line: usize,
+    /// The vertical offset, in pixels, into that line's own visual lines.
+    pub offset: f32,
 }
 
 /// A cursor position in an [`Editor`].

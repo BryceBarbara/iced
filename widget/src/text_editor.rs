@@ -425,6 +425,10 @@ where
     }
 
     /// Returns the current [`Scroll`] position of the [`Content`].
+    ///
+    /// The position last APPLIED: an `Action::Scroll` leaves it un-clamped
+    /// until the next shaping pass, so settle it through
+    /// [`scroll_to`](Self::scroll_to) before comparing it with anything.
     pub fn scroll(&self) -> Scroll {
         self.0.borrow().editor.scroll()
     }
