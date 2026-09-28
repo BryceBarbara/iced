@@ -60,7 +60,7 @@ use std::ops::DerefMut;
 use std::sync::Arc;
 
 pub use text::editor::{
-    Action, Cursor, Edit, Line, LineEnding, Motion, Position, Selection,
+    Action, Cursor, Edit, Line, LineEnding, Motion, Position, Scroll, Selection,
 };
 
 /// A multi-line text input.
@@ -413,6 +413,38 @@ where
         let internal = self.0.get_mut();
 
         internal.editor.perform(action);
+    }
+
+    /// Replaces the text of the [`Content`], keeping the size it was last laid
+    /// out at -- so the cursor and [`Scroll`] position can be put back
+    /// afterwards. Both are reset here, the text they pointed into being gone.
+    pub fn set_text(&mut self, text: &str) {
+        let internal = self.0.get_mut();
+
+        internal.editor.set_text(text);
+    }
+
+    /// Returns the current [`Scroll`] position of the [`Content`].
+    pub fn scroll(&self) -> Scroll {
+        self.0.borrow().editor.scroll()
+    }
+
+    /// Scrolls the [`Content`] to `scroll`, clamped to what its text and size
+    /// allow.
+    pub fn scroll_to(&mut self, scroll: Scroll) {
+        let internal = self.0.get_mut();
+
+        internal.editor.scroll_to(scroll);
+    }
+
+    /// Returns the [`Scroll`] position that shows the end of the [`Content`].
+    ///
+    /// `content.scroll() == content.end_scroll()` is "the view is at the
+    /// bottom"; `content.scroll_to(content.end_scroll())` follows the tail.
+    pub fn end_scroll(&mut self) -> Scroll {
+        let internal = self.0.get_mut();
+
+        internal.editor.end_scroll()
     }
 
     /// Moves the current cursor to reflect the given one.
@@ -1018,49 +1050,58 @@ where
 
         let translation = text_bounds.position() - Point::ORIGIN;
 
-        if let Some(focus) = state.focus.as_ref() {
-            match internal.editor.selection() {
-                Selection::Caret(position) if focus.is_cursor_visible() => {
-                    let cursor =
-                        Rectangle::new(
-                            position + translation,
-                            Size::new(
-                                1.0,
-                                self.line_height
-                                    .to_absolute(self.text_size.unwrap_or_else(
-                                        || renderer.default_size(),
-                                    ))
-                                    .into(),
-                            ),
-                        );
+        // A selected range is drawn whether or not the editor is focused. The
+        // selection still exists when focus moves elsewhere -- a `Copy` would
+        // still take it -- so hiding it makes the editor look as though it
+        // silently dropped what the user selected. The caret stays focus-gated:
+        // a blinking caret in an unfocused editor claims a keyboard it has not
+        // got.
+        match internal.editor.selection() {
+            Selection::Caret(position)
+                if state
+                    .focus
+                    .as_ref()
+                    .is_some_and(Focus::is_cursor_visible) =>
+            {
+                let cursor =
+                    Rectangle::new(
+                        position + translation,
+                        Size::new(
+                            1.0,
+                            self.line_height
+                                .to_absolute(self.text_size.unwrap_or_else(
+                                    || renderer.default_size(),
+                                ))
+                                .into(),
+                        ),
+                    );
 
-                    if let Some(clipped_cursor) =
-                        text_bounds.intersection(&cursor)
-                    {
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds: clipped_cursor,
-                                ..renderer::Quad::default()
-                            },
-                            style.value,
-                        );
-                    }
+                if let Some(clipped_cursor) =
+                    text_bounds.intersection(&cursor)
+                {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: clipped_cursor,
+                            ..renderer::Quad::default()
+                        },
+                        style.value,
+                    );
                 }
-                Selection::Range(ranges) => {
-                    for range in ranges.into_iter().filter_map(|range| {
-                        text_bounds.intersection(&(range + translation))
-                    }) {
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds: range,
-                                ..renderer::Quad::default()
-                            },
-                            style.selection,
-                        );
-                    }
-                }
-                Selection::Caret(_) => {}
             }
+            Selection::Range(ranges) => {
+                for range in ranges.into_iter().filter_map(|range| {
+                    text_bounds.intersection(&(range + translation))
+                }) {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: range,
+                            ..renderer::Quad::default()
+                        },
+                        style.selection,
+                    );
+                }
+            }
+            Selection::Caret(_) => {}
         }
     }
 
