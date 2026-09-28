@@ -385,19 +385,34 @@ where
         // states which no longer exist and `diff_children` will
         // diff the remaining values in the correct order and
         // add new states at the end
+        //
+        // ... but only once there IS a recorded order to reconcile against.
+        // `Tree::new` builds the children from `children()` -- already one per
+        // pane, already in order -- while seeding `Memory::default()`, whose
+        // `order` is empty. Reconciling correct children against that empty
+        // order retains none of them, so the first `diff` after a node is
+        // built discards every child's state and rebuilds it. A nested
+        // `PaneGrid` is first diffed one build later than its parent, so the
+        // discard cascades one level per build: a widget under N nested grids
+        // loses its state on each of the first N+1 builds. Downstream that
+        // reads as a frame that will not settle -- a `scrollable` whose
+        // `last_notified` keeps being thrown away republishes `on_scroll`
+        // every pass, and `iced_winit` warns about consecutive
+        // `RedrawRequested` events producing layout invalidation.
+        if !order.is_empty() {
+            let mut i = 0;
+            let mut j = 0;
+            tree.children.retain(|_| {
+                let retain = self.panes.get(i) == order.get(j);
 
-        let mut i = 0;
-        let mut j = 0;
-        tree.children.retain(|_| {
-            let retain = self.panes.get(i) == order.get(j);
+                if retain {
+                    i += 1;
+                }
+                j += 1;
 
-            if retain {
-                i += 1;
-            }
-            j += 1;
-
-            retain
-        });
+                retain
+            });
+        }
 
         tree.diff_children_custom(
             &self.contents,
