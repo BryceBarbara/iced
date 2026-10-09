@@ -3,6 +3,10 @@ pub mod cache;
 pub mod editor;
 pub mod paragraph;
 
+pub(crate) mod memo;
+
+pub use memo::stats as memo_stats;
+
 pub use cache::Cache;
 pub use editor::Editor;
 pub use paragraph::Paragraph;
@@ -161,6 +165,7 @@ impl FontSystem {
         );
 
         self.version = Version(self.version.0 + 1);
+        memo::bump_font_version(self.version.0);
     }
 
     /// Returns the current [`Version`] of the [`FontSystem`].
