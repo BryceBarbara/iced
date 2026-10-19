@@ -517,10 +517,15 @@ impl editor::Editor for Editor {
             // is the whole point of reusing it: a scroll set afterwards has a
             // viewport to be clamped against, where one set on a brand new
             // `Editor` would collapse straight back to the top.
+            //
+            // The refill is attributed in the editor's font: `update` re-applies
+            // the font only when it CHANGES, so lines refilled with the default
+            // `Attrs` would be shaped (and wrapped) in the default font until
+            // the font next changed.
             buffer_mut_from_editor(&mut internal.editor).set_text(
                 font_system.raw(),
                 text,
-                &cosmic_text::Attrs::new(),
+                &text::to_attributes(internal.font),
                 cosmic_text::Shaping::Advanced,
                 None,
             );
@@ -955,5 +960,146 @@ where
         cosmic_text::BufferRef::Owned(buffer) => buffer,
         cosmic_text::BufferRef::Borrowed(buffer) => buffer,
         cosmic_text::BufferRef::Arc(_buffer) => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::text::editor::Editor as _;
+
+    const FONT: Font = Font::MONOSPACE;
+    const SIZE: Pixels = Pixels(16.0);
+    const LINE_HEIGHT: LineHeight = LineHeight::Absolute(Pixels(20.0));
+
+    // Two visual lines tall and narrow enough that B's first line wraps past
+    // them, so B's later lines stay unshaped below the viewport.
+    const BOUNDS: Size = Size::new(240.0, 40.0);
+
+    const A: &str = "a\nb";
+    const B: &str = "the quick brown fox jumps over the lazy dog 0123456789\n\
+        MMMM iiii WWWW llll mmmm 1111 wwww .... ____ ==== ####\n\
+        pack my box with five dozen liquor jugs, then go home\n\
+        sphinx of black quartz, judge my vow; 9876543210 !!\n\
+        how vexingly quick daft zebras jump over waxy fjords";
+
+    fn layout(editor: &mut Editor, font: Font) {
+        editor.update(
+            BOUNDS,
+            font,
+            SIZE,
+            LINE_HEIGHT,
+            Wrapping::Word,
+            &mut highlighter::PlainText,
+        );
+    }
+
+    fn widths(editor: &Editor) -> Vec<Option<Vec<f32>>> {
+        editor
+            .buffer()
+            .lines
+            .iter()
+            .map(|line| {
+                line.layout_opt()
+                    .map(|layout| layout.iter().map(|l| l.w).collect())
+            })
+            .collect()
+    }
+
+    /// Every line's default attributes, shaped or not, are `font`'s.
+    fn attrs_failures(leg: &str, editor: &Editor, font: Font) -> Vec<String> {
+        let expected = text::to_attributes(font);
+
+        editor
+            .buffer()
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.attrs_list().defaults() != expected)
+            .map(|(i, line)| {
+                format!(
+                    "{leg}: line {i} (shaped: {}) defaults to {:?}, not {:?}",
+                    line.layout_opt().is_some(),
+                    line.attrs_list().defaults().family,
+                    expected.family,
+                )
+            })
+            .collect()
+    }
+
+    /// WGUI-D408: `set_text` shapes refilled text in the editor's font, both
+    /// after the first layout and before it. Every leg is checked, then the
+    /// test panics once naming each failed leg.
+    #[test]
+    fn set_text_shapes_in_the_editors_font() {
+        let mut failures = Vec::new();
+
+        // (a) Refill after the first layout: `update` sees no font change.
+        let mut refilled = Editor::with_text(A);
+        layout(&mut refilled, FONT);
+        refilled.set_text(B);
+        layout(&mut refilled, FONT);
+
+        let refilled_widths = widths(&refilled);
+        if !refilled_widths.iter().any(Option::is_none) {
+            failures.push(
+                "(a): premise: no line of B is left below the viewport"
+                    .to_owned(),
+            );
+        }
+        failures.extend(attrs_failures("(a)", &refilled, FONT));
+
+        // (b) The refilled lines are SHAPED as a fresh editor in FONT
+        // shapes them.
+        let mut fresh = Editor::with_text(B);
+        layout(&mut fresh, FONT);
+        let fresh_widths = widths(&fresh);
+
+        // Premise: the default font shapes them differently. FONT (monospace)
+        // against the default sans-serif differs on any host with both a
+        // monospace and a proportional face; were they equal, this test would
+        // have to load a differing face via `font_system().write()` and
+        // `load_font` instead.
+        let mut default = Editor::with_text(B);
+        layout(&mut default, Font::default());
+        let default_widths = widths(&default);
+
+        let shaped: Vec<usize> = refilled_widths
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| w.as_ref().map(|_| i))
+            .collect();
+
+        if shaped.is_empty() {
+            failures.push("(b): no refilled line is shaped".to_owned());
+        }
+        if !shaped.iter().any(|&i| fresh_widths[i] != default_widths[i]) {
+            failures.push(
+                "(b): premise: the default font shapes every compared line \
+                 like FONT"
+                    .to_owned(),
+            );
+        }
+        for &i in &shaped {
+            if refilled_widths[i] != fresh_widths[i] {
+                failures.push(format!(
+                    "(b): line {i} wraps to widths {:?}, a fresh editor in \
+                     FONT to {:?}",
+                    refilled_widths[i], fresh_widths[i],
+                ));
+            }
+        }
+
+        // (c) Refill before the first layout (the console's first fill).
+        let mut first_fill = Editor::with_text("");
+        first_fill.set_text(B);
+        layout(&mut first_fill, FONT);
+        failures.extend(attrs_failures("(c)", &first_fill, FONT));
+
+        assert!(
+            failures.is_empty(),
+            "set_text font legs failed:\n{}",
+            failures.join("\n")
+        );
     }
 }
